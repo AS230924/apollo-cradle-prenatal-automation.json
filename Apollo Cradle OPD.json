@@ -1,0 +1,1179 @@
+{
+  "name": "Apollo Cradle OPD",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "documentId": {
+          "value": "{{$env.GOOGLE_SHEET_ID}}"
+        },
+        "sheetName": {
+          "value": "Patient Registry"
+        },
+        "options": {}
+      },
+      "id": "af167ca3-d468-4450-a4bf-33859b70114c",
+      "name": "New Patient Registration",
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [
+        -2128,
+        1072
+      ],
+      "notes": "Triggers when a new row is added to the Patient Registry tab. Each new patient registration kicks off care plan generation."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════\n// CARE PLAN GENERATOR\n// Generates 12-15 prenatal visit milestones from due date\n// Based on FOGSI/ACOG standard obstetric protocols\n// NO AI — this is deterministic medical protocol\n// ═══════════════════════════════════════════════════════\n\nconst patient = $input.all()[0].json;\nconst dueDate = new Date(patient.due_date);\nconst patientId = patient.patient_id;\nconst riskLevel = patient.risk_level || 'normal';\n\n// Calculate gestational age reference points from due date\n// Due date = 40 weeks from LMP\nfunction weeksBeforeDue(weeks) {\n  const d = new Date(dueDate);\n  d.setDate(d.getDate() - (40 - weeks) * 7);\n  return d;\n}\n\nfunction formatDate(d) {\n  return d.toISOString().split('T')[0];\n}\n\n// Standard prenatal visit schedule (FOGSI/ACOG guidelines)\nconst carePlan = [\n  {\n    visit_number: 1,\n    gestational_week: 8,\n    visit_type: 'booking_visit',\n    diagnostics_needed: 'cbc, blood_group, hiv_hbsag, tsh, urine_routine, dating_ultrasound',\n    notes: 'First visit — confirm pregnancy, dating scan, baseline blood work'\n  },\n  {\n    visit_number: 2,\n    gestational_week: 12,\n    visit_type: 'nt_scan',\n    diagnostics_needed: 'ultrasound_nt, dual_marker',\n    notes: 'NT scan MUST be between 11w0d and 13w6d — time-critical window'\n  },\n  {\n    visit_number: 3,\n    gestational_week: 16,\n    visit_type: 'routine',\n    diagnostics_needed: 'quadruple_marker_optional',\n    notes: 'Routine check, optional quad marker test'\n  },\n  {\n    visit_number: 4,\n    gestational_week: 20,\n    visit_type: 'anomaly_scan',\n    diagnostics_needed: 'ultrasound_anomaly, cbc, blood_sugar, thyroid',\n    notes: 'Anomaly scan — detailed fetal anatomy. Window: 18-22 weeks. CRITICAL.'\n  },\n  {\n    visit_number: 5,\n    gestational_week: 24,\n    visit_type: 'glucose_test',\n    diagnostics_needed: 'glucose_challenge_test, cbc',\n    notes: 'Gestational diabetes screening — must be 24-28 weeks'\n  },\n  {\n    visit_number: 6,\n    gestational_week: 28,\n    visit_type: 'routine',\n    diagnostics_needed: 'growth_scan, cbc, antibody_screen_if_rh_neg',\n    notes: 'Third trimester begins. Anti-D if Rh negative.'\n  },\n  {\n    visit_number: 7,\n    gestational_week: 30,\n    visit_type: 'routine',\n    diagnostics_needed: 'blood_pressure_monitoring',\n    notes: 'Fortnightly visits begin'\n  },\n  {\n    visit_number: 8,\n    gestational_week: 32,\n    visit_type: 'growth_scan',\n    diagnostics_needed: 'ultrasound_growth, cbc',\n    notes: 'Growth scan — check fetal weight and amniotic fluid'\n  },\n  {\n    visit_number: 9,\n    gestational_week: 34,\n    visit_type: 'routine',\n    diagnostics_needed: 'blood_pressure_monitoring',\n    notes: 'Check presentation, discuss birth plan'\n  },\n  {\n    visit_number: 10,\n    gestational_week: 36,\n    visit_type: 'growth_scan',\n    diagnostics_needed: 'ultrasound_growth, gbs_swab, cbc',\n    notes: 'Weekly visits begin. GBS screening. Growth scan.'\n  },\n  {\n    visit_number: 11,\n    gestational_week: 37,\n    visit_type: 'weekly_check',\n    diagnostics_needed: 'nst',\n    notes: 'Non-stress test. Weekly from now.'\n  },\n  {\n    visit_number: 12,\n    gestational_week: 38,\n    visit_type: 'weekly_check',\n    diagnostics_needed: 'nst',\n    notes: 'NST + cervical check'\n  },\n  {\n    visit_number: 13,\n    gestational_week: 39,\n    visit_type: 'weekly_check',\n    diagnostics_needed: 'nst, ultrasound_afi',\n    notes: 'NST + amniotic fluid check'\n  },\n  {\n    visit_number: 14,\n    gestational_week: 40,\n    visit_type: 'due_date_check',\n    diagnostics_needed: 'nst, ultrasound_afi, biophysical_profile',\n    notes: 'Due date. Discuss induction if no spontaneous labour.'\n  }\n];\n\n// For high-risk patients, add extra monitoring visits\nif (riskLevel === 'high') {\n  // Add extra growth scans at 26 and 34 weeks\n  carePlan.push({\n    visit_number: 15,\n    gestational_week: 26,\n    visit_type: 'high_risk_monitoring',\n    diagnostics_needed: 'ultrasound_growth, doppler',\n    notes: 'Additional high-risk monitoring — growth + doppler'\n  });\n}\n\n// Sort by gestational week\ncarePlan.sort((a, b) => a.gestational_week - b.gestational_week);\n\n// Generate actual dates and output\nconst output = carePlan.map((visit, idx) => {\n  const targetDate = weeksBeforeDue(visit.gestational_week);\n  return {\n    json: {\n      patient_id: patientId,\n      patient_name: patient.name,\n      primary_ob: patient.primary_ob,\n      visit_number: idx + 1,\n      gestational_week: visit.gestational_week,\n      visit_type: visit.visit_type,\n      diagnostics_needed: visit.diagnostics_needed,\n      target_date: formatDate(targetDate),\n      status: 'pending',\n      notes: visit.notes,\n      lab_time: '',\n      scan_time: '',\n      consultation_time: '',\n      scheduled_date: ''\n    }\n  };\n});\n\nreturn output;"
+      },
+      "id": "16441668-dbac-4059-a7bf-0381b190c546",
+      "name": "Generate Care Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1904,
+        1072
+      ],
+      "notes": "Deterministic care plan based on standard obstetric protocols. NO AI needed. Takes due date, calculates all milestone dates, outputs 12-15 visit rows."
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "value": "{{$env.GOOGLE_SHEET_ID}}"
+        },
+        "sheetName": {
+          "value": "Care Plan"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        },
+        "options": {}
+      },
+      "id": "551367c8-3ee2-4996-8c84-1c460b640859",
+      "name": "Write Care Plan to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -1680,
+        976
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IccQ5YIym22ftuUd",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Appends all visit milestones to the Care Plan tab. Each row = one scheduled visit with target date and required diagnostics."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════\n// BUNDLED VISIT SCHEDULER\n// Books the FIRST upcoming visit as a coordinated bundle:\n//   Lab slot → Scan slot → Consultation slot\n// Sequence: diagnostics FIRST, consultation LAST\n// ═══════════════════════════════════════════════════════\n\nconst visits = $input.all();\nconst today = new Date();\n\n// Find the first pending visit that's in the future\nconst nextVisit = visits\n  .map(v => v.json)\n  .filter(v => v.status === 'pending')\n  .filter(v => new Date(v.target_date) > today)\n  .sort((a, b) => new Date(a.target_date) - new Date(b.target_date))[0];\n\nif (!nextVisit) {\n  return [{ json: { skip: true, reason: 'No upcoming visits to schedule' } }];\n}\n\n// Determine what diagnostics this visit needs\nconst diags = nextVisit.diagnostics_needed.split(', ').map(d => d.trim());\nconst needsScan = diags.some(d => d.startsWith('ultrasound') || d === 'nst');\nconst needsLab = diags.some(d => !d.startsWith('ultrasound') && d !== 'nst');\n\n// Build the bundled schedule\n// Rule: Lab first → Scan second → Consultation last\n// Default morning slots, 15 min gaps between steps\nconst visitDate = nextVisit.target_date;\nlet labTime = '';\nlet scanTime = '';\nlet consultTime = '';\n\nif (needsLab && needsScan) {\n  labTime = '09:30';\n  scanTime = '09:45';  // Blood draw takes ~10 min\n  consultTime = '10:30'; // Anomaly scan takes ~30 min\n} else if (needsScan && !needsLab) {\n  scanTime = '09:30';\n  consultTime = '10:15';\n} else if (needsLab && !needsScan) {\n  labTime = '09:30';\n  consultTime = '10:00';\n} else {\n  consultTime = '09:30'; // Consultation only\n}\n\nreturn [{\n  json: {\n    patient_id: nextVisit.patient_id,\n    patient_name: nextVisit.patient_name,\n    primary_ob: nextVisit.primary_ob,\n    visit_number: nextVisit.visit_number,\n    visit_type: nextVisit.visit_type,\n    gestational_week: nextVisit.gestational_week,\n    scheduled_date: visitDate,\n    lab_time: labTime,\n    scan_time: scanTime,\n    consultation_time: consultTime,\n    diagnostics_needed: nextVisit.diagnostics_needed,\n    needs_scan: needsScan,\n    needs_lab: needsLab,\n    notes: nextVisit.notes\n  }\n}];"
+      },
+      "id": "4160dcda-6436-4ac3-9b68-afb8f02b86cc",
+      "name": "Schedule Bundled Visit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1680,
+        1168
+      ],
+      "notes": "Books lab + scan + consultation as ONE coordinated bundle. Diagnostics FIRST, consultation LAST. Deterministic — no AI."
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "value": "{{$env.GOOGLE_SHEET_ID}}"
+        },
+        "sheetName": {
+          "value": "Care Plan"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        },
+        "options": {
+          "cellFormat": "USER_ENTERED"
+        }
+      },
+      "id": "b5af1b58-ff40-4e4e-a44b-672e305472a7",
+      "name": "Update Care Plan (Scheduled)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -1456,
+        1264
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IccQ5YIym22ftuUd",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Updates the care plan row with actual scheduled date and time slots."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate WhatsApp confirmation message for the patient\nconst visit = $input.all()[0].json;\n\nlet message = `Hi ${visit.patient_name}! Your visit has been scheduled at Apollo Cradle.\\n\\n`;\nmessage += `📅 Date: ${visit.scheduled_date}\\n\\n`;\nmessage += `Your visit schedule:\\n`;\n\nif (visit.lab_time) {\n  message += `🩸 ${visit.lab_time} — Blood test (Ground Floor Lab)\\n`;\n}\nif (visit.scan_time) {\n  message += `📷 ${visit.scan_time} — Ultrasound (2nd Floor)\\n`;\n}\nmessage += `👩‍⚕️ ${visit.consultation_time} — Dr. ${visit.primary_ob} consultation\\n`;\nmessage += `\\nEstimated total time: ${visit.needs_scan ? '75-90' : '30-45'} minutes\\n`;\nmessage += `\\nWe'll send you a quick check-in form the evening before. See you soon!`;\n\nreturn [{ json: { phone: visit.patient_id, message: message } }];"
+      },
+      "id": "18c01f9a-6331-4bb3-8fa3-493cc59fc3f2",
+      "name": "Compose Confirmation Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1456,
+        1072
+      ],
+      "notes": "Generates the WhatsApp confirmation message with the full bundled schedule."
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "phoneNumberId": "={{$env.WHATSAPP_PHONE_ID}}",
+        "recipientPhoneNumber": "={{$json.phone}}"
+      },
+      "id": "00fe69fb-e607-4eb2-83e1-a36286ac9f6e",
+      "name": "Send WhatsApp Confirmation",
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1,
+      "position": [
+        -1232,
+        1072
+      ],
+      "webhookId": "e30db675-a853-4fd3-97fb-c7b0b372dc9a",
+      "notes": "Sends the bundled visit schedule to the patient via WhatsApp."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 18
+            }
+          ]
+        }
+      },
+      "id": "751850a3-392f-49cc-85c8-cb27fd562708",
+      "name": "Daily 6pm Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -2128,
+        752
+      ],
+      "notes": "Runs every day at 6pm IST. Finds all patients with appointments tomorrow and sends them the pre-visit intake form via WhatsApp."
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "value": "{{$env.GOOGLE_SHEET_ID}}"
+        },
+        "sheetName": {
+          "value": "Care Plan"
+        },
+        "options": {}
+      },
+      "id": "6e872be8-a1cf-4e45-b861-97ccc2d3578f",
+      "name": "Read Care Plan",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -1904,
+        752
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IccQ5YIym22ftuUd",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Reads all scheduled visits from the Care Plan tab."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter for tomorrow's appointments only\nconst allVisits = $input.all();\nconst tomorrow = new Date();\ntomorrow.setDate(tomorrow.getDate() + 1);\nconst tomorrowStr = tomorrow.toISOString().split('T')[0];\n\nconst tomorrowVisits = allVisits\n  .filter(v => v.json.scheduled_date === tomorrowStr)\n  .filter(v => v.json.status === 'scheduled');\n\nif (tomorrowVisits.length === 0) {\n  return [{ json: { skip: true, reason: 'No appointments tomorrow' } }];\n}\n\nreturn tomorrowVisits;"
+      },
+      "id": "c7d6c10a-8622-4419-b664-629e72784cb1",
+      "name": "Filter Tomorrow's Visits",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1680,
+        752
+      ],
+      "notes": "Filters the care plan to find only visits scheduled for tomorrow."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.skip}}",
+              "value2": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "84813a38-0858-4032-ad89-64099ffa8ce3",
+      "name": "Has Visits?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1456,
+        752
+      ],
+      "notes": "Skip the rest of the workflow if no appointments tomorrow."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Compose the pre-visit intake message for each patient\nconst visit = $input.all()[0].json;\n\nconst message = `Hi ${visit.patient_name}! 👋\n\nYour visit is tomorrow at Apollo Cradle.\n\n📅 ${visit.scheduled_date}\n${visit.lab_time ? '🩸 ' + visit.lab_time + ' — Blood test\\n' : ''}${visit.scan_time ? '📷 ' + visit.scan_time + ' — Ultrasound\\n' : ''}👩‍⚕️ ${visit.consultation_time} — Dr. ${visit.primary_ob}\n\nQuick check before your visit (reply with numbers):\n\n1️⃣ Any new symptoms since your last visit? (describe briefly, or type \"none\")\n\n2️⃣ Are you taking your prescribed supplements regularly? (yes/no)\n\n3️⃣ Any specific concerns you want Dr. ${visit.primary_ob} to address tomorrow?\n\nPlease reply to this message — it helps your doctor prepare for your visit. 🙏`;\n\nreturn [{\n  json: {\n    patient_id: visit.patient_id,\n    patient_name: visit.patient_name,\n    primary_ob: visit.primary_ob,\n    phone: visit.patient_id,\n    visit_date: visit.scheduled_date,\n    gestational_week: visit.gestational_week,\n    visit_type: visit.visit_type,\n    message: message\n  }\n}];"
+      },
+      "id": "c5f0657b-e455-415e-8d50-4820b449b723",
+      "name": "Compose Intake Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1232,
+        752
+      ],
+      "notes": "Generates a personalized WhatsApp intake message for each patient with their specific schedule and doctor name."
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "phoneNumberId": "={{$env.WHATSAPP_PHONE_ID}}",
+        "recipientPhoneNumber": "={{$json.phone}}"
+      },
+      "id": "be8aa40e-b070-4ec4-a344-733c6ea8daed",
+      "name": "Send Intake WhatsApp",
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1,
+      "position": [
+        -1008,
+        752
+      ],
+      "webhookId": "5960166b-33f8-4b76-9824-0ac212f90fcd",
+      "notes": "Sends the pre-visit intake form to the patient."
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-response",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "50edacd1-bce9-43fa-b583-50929d19d40d",
+      "name": "Patient Responds (Webhook)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -2128,
+        1680
+      ],
+      "webhookId": "b90e430c-d5a4-4ed0-81ef-8469c6d2b2ec",
+      "notes": "Receives the patient's WhatsApp response via webhook. The WhatsApp Business API forwards incoming messages here."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract patient ID and response text from WhatsApp webhook\nconst body = $input.all()[0].json.body;\n\n// WhatsApp webhook payload structure\nconst entry = body.entry?.[0];\nconst changes = entry?.changes?.[0];\nconst message = changes?.value?.messages?.[0];\n\nif (!message) {\n  return [{ json: { skip: true, reason: 'No message in webhook' } }];\n}\n\nreturn [{\n  json: {\n    patient_phone: message.from,\n    response_text: message.text?.body || '',\n    timestamp: message.timestamp,\n    message_id: message.id\n  }\n}];"
+      },
+      "id": "917d07f0-4527-4c29-89d7-c62cec0dd480",
+      "name": "Parse WhatsApp Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1904,
+        1680
+      ],
+      "notes": "Extracts the patient's phone number and response text from the WhatsApp webhook payload."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.urgency_flag}}",
+              "operation": "equals",
+              "value2": "urgent"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "016b70a4-6877-4ecc-8b1b-6b6ff9008b2e",
+      "name": "Urgent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1328,
+        1584
+      ],
+      "notes": "Routes urgent cases (bleeding, reduced movement, etc.) to immediate coordinator notification."
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "value": "{{$env.GOOGLE_SHEET_ID}}"
+        },
+        "sheetName": {
+          "value": "Pre-Visit Notes"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        },
+        "options": {}
+      },
+      "id": "d72add2e-bf77-4fb1-9061-4515ab5196ac",
+      "name": "Write Pre-Visit Notes",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -1104,
+        1488
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IccQ5YIym22ftuUd",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Writes the structured pre-visit notes to the doctor's dashboard (Google Sheet). Doctor sees these before the consultation."
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "phoneNumberId": "={{$env.WHATSAPP_PHONE_ID}}",
+        "recipientPhoneNumber": "={{$env.COORDINATOR_PHONE}}"
+      },
+      "id": "b6fac36c-c1b2-4cb0-90da-de3cab17a641",
+      "name": "Alert Coordinator (Urgent)",
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1,
+      "position": [
+        -1104,
+        1680
+      ],
+      "webhookId": "5732bea6-91f3-44d1-b7f5-554aaed74355",
+      "notes": "CLINICAL SAFETY: If the patient reports urgent symptoms (bleeding, reduced movement, etc.), immediately alert the scheduling coordinator to call the patient."
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "consultation-complete",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "972a3340-8f96-486d-80ef-006aec53b83f",
+      "name": "Consultation Complete (Webhook)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -2128,
+        2260
+      ],
+      "webhookId": "e745c423-a920-4ae8-bb81-51de7ff9d993",
+      "notes": "Triggered when the doctor marks a consultation as complete in the HMS. Payload includes: patient_id, clinical_notes, diagnostics_completed, care_plan_updates."
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "phoneNumberId": "={{$env.WHATSAPP_PHONE_ID}}",
+        "recipientPhoneNumber": "={{$json.body.patient_phone}}"
+      },
+      "id": "2d3dd2f9-cf80-4205-abd5-b5a15ab9e01a",
+      "name": "Send Summary to Patient",
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1,
+      "position": [
+        -1552,
+        2000
+      ],
+      "webhookId": "2499cbf0-6b37-4dab-b8b4-04d3097a2b82",
+      "notes": "Sends the patient-friendly visit summary via WhatsApp immediately after the consultation."
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "value": "{{$env.GOOGLE_SHEET_ID}}"
+        },
+        "sheetName": {
+          "value": "Visit Log"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        },
+        "options": {}
+      },
+      "id": "435be440-50d6-4288-8e92-2ba807ea4599",
+      "name": "Log Visit to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -1840,
+        2408
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IccQ5YIym22ftuUd",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Records the visit in the Visit Log tab with both clinical notes and patient-friendly summary."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════\n// AUTO-SCHEDULE NEXT BUNDLED VISIT\n// Reads the care plan, finds the next pending milestone,\n// and schedules it as a coordinated bundle\n// NO AI — deterministic scheduling\n// ═══════════════════════════════════════════════════════\n\nconst input = $input.all()[0].json;\nconst patientId = input.body.patient_id;\n\n// Mark current visit as completed in care plan\nconst currentVisit = {\n  patient_id: patientId,\n  visit_number: input.body.visit_number,\n  status: 'completed',\n  actual_date: new Date().toISOString().split('T')[0]\n};\n\nreturn [{ json: {\n  patient_id: patientId,\n  patient_name: input.body.patient_name,\n  primary_ob: input.body.doctor_name,\n  current_visit_completed: currentVisit,\n  schedule_next: true,\n  message: 'Current visit marked complete. Next bundled visit will be scheduled by Workflow 01.'\n} }];"
+      },
+      "id": "b9c7688c-a021-463b-8d45-26905da0d6e9",
+      "name": "Trigger Next Visit Scheduling",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1552,
+        2208
+      ],
+      "notes": "Marks the current visit as completed and triggers the bundled scheduler to book the next visit from the care plan."
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "value": "{{$env.GOOGLE_SHEET_ID}}"
+        },
+        "sheetName": {
+          "value": "Care Plan"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        },
+        "options": {
+          "cellFormat": "USER_ENTERED"
+        }
+      },
+      "id": "abb7a260-867e-46c5-9b12-6e91c3182642",
+      "name": "Mark Visit Complete in Care Plan",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -1328,
+        2208
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IccQ5YIym22ftuUd",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Updates the Care Plan tab to mark this visit as 'completed' with the actual date."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 14
+            }
+          ]
+        }
+      },
+      "id": "ad47adf7-4c25-467e-99c8-a0c455cfc0df",
+      "name": "Check Lab Results (2pm Daily)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -2128,
+        3048
+      ],
+      "notes": "Runs at 2pm daily — checks if morning blood work results are ready and sends them to patients."
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "value": "{{$env.GOOGLE_SHEET_ID}}"
+        },
+        "sheetName": {
+          "value": "Lab Results Pending"
+        },
+        "options": {}
+      },
+      "id": "31bc3d97-886c-4d22-a969-c4f7540ddf35",
+      "name": "Read Pending Lab Results",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -1904,
+        3048
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IccQ5YIym22ftuUd",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Reads the pending lab results queue. In production, this would connect to the LIS (Lab Information System) via API."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter for results that are now ready\nconst pending = $input.all();\nconst ready = pending.filter(r => r.json.status === 'ready' && !r.json.sent_to_patient);\n\nif (ready.length === 0) {\n  return [{ json: { skip: true } }];\n}\n\nreturn ready.map(r => {\n  // Simple classification: are all values normal?\n  const allNormal = r.json.abnormal_flags === 'none';\n  \n  let message;\n  if (allNormal) {\n    message = `Hi ${r.json.patient_name}! Your blood test results from today's visit are in — everything looks normal. ✅\\n\\nDetailed results are available at your next visit with Dr. ${r.json.doctor_name}. No action needed from your side.`;\n  } else {\n    message = `Hi ${r.json.patient_name}, your blood test results from today's visit are ready. Dr. ${r.json.doctor_name} will review them and reach out if any follow-up is needed.\\n\\nNothing to worry about — some values just need a closer look. You'll get a full review at your next visit.`;\n  }\n  \n  return { json: { ...r.json, message, allNormal } };\n});"
+      },
+      "id": "4b292011-9d3d-4fa0-a989-d0ddae408d45",
+      "name": "Compose Lab Results Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1680,
+        3048
+      ],
+      "notes": "Generates patient-friendly lab result notifications. Normal results get a clear 'all good' message. Abnormal results get a reassuring 'doctor will review' message — never alarming."
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "phoneNumberId": "={{$env.WHATSAPP_PHONE_ID}}",
+        "recipientPhoneNumber": "={{$json.patient_phone}}"
+      },
+      "id": "08569c0a-e175-4339-b8fe-1c7fb439d7a0",
+      "name": "Send Lab Results WhatsApp",
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1,
+      "position": [
+        -1456,
+        3048
+      ],
+      "webhookId": "60fcee62-0ca7-4bed-a744-0e0cb1fefb3b",
+      "notes": "Sends lab results to the patient. Eliminates the need to physically return to the hospital to collect printed reports."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "id": "5b1312d5-b5d8-4243-a669-fef233c0579f",
+      "name": "Weekly Monday 9am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -2128,
+        2728
+      ],
+      "notes": "Runs every Monday at 9am. Scans all active patients for milestones approaching their gestational window deadline."
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "value": "{{$env.GOOGLE_SHEET_ID}}"
+        },
+        "sheetName": {
+          "value": "Care Plan"
+        },
+        "options": {}
+      },
+      "id": "595af20a-78f4-41eb-aa25-d7fbcb02c4db",
+      "name": "Read All Care Plans",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -1904,
+        2728
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IccQ5YIym22ftuUd",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Reads all visits across all patients to check for approaching or missed milestones."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════\n// MISSED MILESTONE DETECTOR\n// Identifies patients approaching time-critical milestones\n// with no appointment booked\n//\n// Time-critical milestones:\n// - NT scan: must be 11w0d to 13w6d\n// - Anomaly scan: must be 18w to 22w\n// - Glucose challenge: must be 24w to 28w\n// - GBS swab: must be 35w to 37w\n//\n// NO AI — this is date arithmetic\n// ═══════════════════════════════════════════════════════\n\nconst allVisits = $input.all().map(v => v.json);\n\n// Define time-critical windows (gestational weeks)\nconst criticalWindows = {\n  'nt_scan': { earliest: 11, latest: 13, label: 'NT Scan', urgency: 'high' },\n  'anomaly_scan': { earliest: 18, latest: 22, label: 'Anomaly Scan', urgency: 'high' },\n  'glucose_test': { earliest: 24, latest: 28, label: 'Glucose Challenge Test', urgency: 'medium' },\n};\n\nconst today = new Date();\nconst alerts = [];\n\n// Group visits by patient\nconst byPatient = {};\nfor (const v of allVisits) {\n  if (!byPatient[v.patient_id]) byPatient[v.patient_id] = [];\n  byPatient[v.patient_id].push(v);\n}\n\nfor (const [patientId, visits] of Object.entries(byPatient)) {\n  for (const visit of visits) {\n    // Only check pending/unscheduled critical milestones\n    if (visit.status !== 'pending') continue;\n    \n    const window = criticalWindows[visit.visit_type];\n    if (!window) continue; // Not a time-critical visit\n    \n    const targetDate = new Date(visit.target_date);\n    const daysUntilTarget = Math.floor((targetDate - today) / (1000 * 60 * 60 * 24));\n    \n    // Calculate the latest possible date (end of gestational window)\n    // Approximate: each week ≈ 7 days from target\n    const windowRemaining = (window.latest - visit.gestational_week) * 7 + daysUntilTarget;\n    \n    // Alert if:\n    // - Less than 14 days until the window closes AND not scheduled\n    // - OR the window has already passed (missed)\n    if (windowRemaining < 14 && !visit.scheduled_date) {\n      const status = windowRemaining < 0 ? 'MISSED' : 'CLOSING SOON';\n      alerts.push({\n        json: {\n          patient_id: patientId,\n          patient_name: visit.patient_name,\n          primary_ob: visit.primary_ob,\n          milestone: window.label,\n          gestational_week: visit.gestational_week,\n          window_closes_in_days: Math.max(0, windowRemaining),\n          status: status,\n          urgency: window.urgency,\n          action_needed: status === 'MISSED'\n            ? `${window.label} window has closed. Consult ${visit.primary_ob} for alternative plan.`\n            : `Priority-book ${window.label} within ${windowRemaining} days. Patient at ${visit.gestational_week} weeks.`,\n          target_date: visit.target_date\n        }\n      });\n    }\n  }\n}\n\nif (alerts.length === 0) {\n  return [{ json: { skip: true, message: 'No milestone alerts this week.' } }];\n}\n\n// Sort by urgency: MISSED first, then by days remaining\nalerts.sort((a, b) => {\n  if (a.json.status === 'MISSED' && b.json.status !== 'MISSED') return -1;\n  if (b.json.status === 'MISSED' && a.json.status !== 'MISSED') return 1;\n  return a.json.window_closes_in_days - b.json.window_closes_in_days;\n});\n\nreturn alerts;"
+      },
+      "id": "6dccc375-a1d6-4137-aebb-82a8e3017fb0",
+      "name": "Detect At-Risk Milestones",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1680,
+        2728
+      ],
+      "notes": "CLINICAL SAFETY: Scans all active patients for time-critical milestones (NT scan, anomaly scan, glucose test) that are approaching their window deadline with no appointment booked. Pure date arithmetic — no AI."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.skip}}",
+              "value2": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d11fb9fa-744b-4164-99ce-d0b7c354d20f",
+      "name": "Any Alerts?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1456,
+        2728
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Compile all alerts into a single coordinator summary\nconst alerts = $input.all().map(a => a.json);\n\nlet summary = `📋 WEEKLY MILESTONE REPORT — ${new Date().toISOString().split('T')[0]}\\n`;\nsummary += `${alerts.length} patient(s) need attention:\\n\\n`;\n\nfor (const alert of alerts) {\n  const icon = alert.status === 'MISSED' ? '🔴' : '🟡';\n  summary += `${icon} ${alert.patient_name} — ${alert.milestone}\\n`;\n  summary += `   Status: ${alert.status}`;\n  if (alert.window_closes_in_days > 0) {\n    summary += ` (${alert.window_closes_in_days} days remaining)`;\n  }\n  summary += `\\n   Action: ${alert.action_needed}\\n\\n`;\n}\n\nsummary += `Please priority-book these patients this week.`;\n\nreturn [{ json: { summary, alert_count: alerts.length } }];"
+      },
+      "id": "5114979f-1c8e-47a9-a9fb-34436af028fc",
+      "name": "Compile Coordinator Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1232,
+        2632
+      ],
+      "notes": "Compiles all milestone alerts into a single summary message for the scheduling coordinator."
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "phoneNumberId": "={{$env.WHATSAPP_PHONE_ID}}",
+        "recipientPhoneNumber": "={{$env.COORDINATOR_PHONE}}"
+      },
+      "id": "1a499d6a-50cf-4d90-92da-1d1e13406e54",
+      "name": "Send to Coordinator",
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1,
+      "position": [
+        -1008,
+        2632
+      ],
+      "webhookId": "2fa50b69-8109-4aff-a599-4f409e4c4910",
+      "notes": "Sends the weekly milestone report to the scheduling coordinator via WhatsApp."
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "value": "{{$env.GOOGLE_SHEET_ID}}"
+        },
+        "sheetName": {
+          "value": "Milestone Alerts Log"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        },
+        "options": {}
+      },
+      "id": "d40180bd-045e-452a-a54c-8051ecce12f5",
+      "name": "Log Alerts to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -1232,
+        2824
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IccQ5YIym22ftuUd",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Logs all milestone alerts for tracking resolution and historical analysis."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.response_text }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a prenatal symptom triage assistant. Your task is to analyze patient responses to pre-visit intake questions and extract structured information.\n\nAnalyze the patient response and extract:\n1. new_symptoms: Any new symptoms mentioned (or \"none\" if none reported)\n2. symptom_severity: Classify as normal, moderate, or urgent\n3. medication_compliance: Whether taking supplements regularly (yes/no/unclear)\n4. patient_concerns: Any specific concerns for the doctor\n5. urgency_flag: Set to \"urgent\" if ANY of these red flags appear:\n   - Vaginal bleeding\n   - Reduced fetal movement\n   - Severe headache with visual changes\n   - Severe abdominal pain\n   - Fluid leakage\n   - Fever above 100.4°F\n   Otherwise set to \"normal\"\n6. urgency_reason: If urgent, explain why\n\nBe conservative with urgency classification - when in doubt, flag as urgent."
+        }
+      },
+      "id": "b8f5036f-578b-49b0-8496-6086c75e6101",
+      "name": "AI Agent: Symptom Triage",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "position": [
+        -1680,
+        1576
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "claude-sonnet-4-20250514"
+        },
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "id": "1eca9c47-d8ae-4b77-a36a-b74c83f42f62",
+      "name": "Anthropic Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        -1680,
+        1824
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "6ce905e8-3faa-418e-89d6-a3e325d22e9b",
+      "name": "Structured Output Parser",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        -1536,
+        1824
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "Thank you! Your pre-visit information has been recorded. We'll see you tomorrow at your scheduled time.",
+        "options": {}
+      },
+      "id": "5cee4b31-ccc4-43f0-b501-3c839df5bb4a",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -1328,
+        1776
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.body.clinical_notes }}",
+        "options": {
+          "systemMessage": "You are a medical communication assistant specializing in prenatal care. Your task is to translate clinical notes into clear, reassuring, patient-friendly language.\n\nYour audience is pregnant women who may be anxious about their health and their baby. Your tone should be:\n- Warm and reassuring\n- Clear and simple (avoid medical jargon)\n- Honest but not alarming\n- Encouraging\n\nTranslate clinical abbreviations:\n- NAD = No abnormalities detected = \"Everything looks healthy\"\n- EFW = Estimated fetal weight = \"Your baby weighs approximately...\"\n- AFI = Amniotic fluid index = \"The fluid around your baby is...\"\n- FHR = Fetal heart rate = \"Your baby's heartbeat is...\"\n\nStructure your summary:\n1. Start with the most important positive finding\n2. Explain what was checked\n3. Share measurements in simple terms\n4. End with next steps or reassurance\n\nExample transformation:\n\"Anomaly scan NAD, EFW 350g, AFI normal, FHR 145 bpm\"\n→\n\"Great news! Your baby's detailed scan looks healthy. We checked all the major organs and development, and everything is progressing beautifully. Your baby weighs about 350 grams (just under a pound), which is perfect for this stage. The fluid around your baby and the heartbeat (145 beats per minute) are both normal. Keep up the great work with your prenatal care!\"\n\nGenerate a patient-friendly summary now."
+        }
+      },
+      "id": "cb15da3f-cde8-4374-985e-bb8a39290950",
+      "name": "AI Agent: Clinical Summary",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "position": [
+        -1904,
+        2008
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "claude-sonnet-4-20250514"
+        },
+        "options": {
+          "temperature": 0.3
+        }
+      },
+      "id": "871c7cb1-01b2-4280-bff8-4e4261d99bc2",
+      "name": "Anthropic Chat Model1",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        -1824,
+        2240
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "New Patient Registration": {
+      "main": [
+        [
+          {
+            "node": "Generate Care Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Care Plan": {
+      "main": [
+        [
+          {
+            "node": "Write Care Plan to Sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Schedule Bundled Visit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Bundled Visit": {
+      "main": [
+        [
+          {
+            "node": "Update Care Plan (Scheduled)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Compose Confirmation Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose Confirmation Message": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily 6pm Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Care Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Care Plan": {
+      "main": [
+        [
+          {
+            "node": "Filter Tomorrow's Visits",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Tomorrow's Visits": {
+      "main": [
+        [
+          {
+            "node": "Has Visits?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Visits?": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Compose Intake Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose Intake Message": {
+      "main": [
+        [
+          {
+            "node": "Send Intake WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Patient Responds (Webhook)": {
+      "main": [
+        [
+          {
+            "node": "Parse WhatsApp Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consultation Complete (Webhook)": {
+      "main": [
+        [
+          {
+            "node": "Log Visit to Sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "AI Agent: Clinical Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Next Visit Scheduling": {
+      "main": [
+        [
+          {
+            "node": "Mark Visit Complete in Care Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Lab Results (2pm Daily)": {
+      "main": [
+        [
+          {
+            "node": "Read Pending Lab Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Pending Lab Results": {
+      "main": [
+        [
+          {
+            "node": "Compose Lab Results Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose Lab Results Message": {
+      "main": [
+        [
+          {
+            "node": "Send Lab Results WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekly Monday 9am": {
+      "main": [
+        [
+          {
+            "node": "Read All Care Plans",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read All Care Plans": {
+      "main": [
+        [
+          {
+            "node": "Detect At-Risk Milestones",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect At-Risk Milestones": {
+      "main": [
+        [
+          {
+            "node": "Any Alerts?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Alerts?": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Compile Coordinator Report",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Log Alerts to Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compile Coordinator Report": {
+      "main": [
+        [
+          {
+            "node": "Send to Coordinator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse WhatsApp Response": {
+      "main": [
+        [
+          {
+            "node": "AI Agent: Symptom Triage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent: Symptom Triage",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI Agent: Symptom Triage",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent: Symptom Triage": {
+      "main": [
+        [
+          {
+            "node": "Urgent?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent: Clinical Summary",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent: Clinical Summary": {
+      "main": [
+        [
+          {
+            "node": "Send Summary to Patient",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Trigger Next Visit Scheduling",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Urgent?": {
+      "main": [
+        [
+          {
+            "node": "Write Pre-Visit Notes",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert Coordinator (Urgent)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "c7670f5c-97fe-45fb-be3e-62cb42d09ce3",
+  "meta": {
+    "instanceId": "d3b5db281fc67f4a66e3e781672b5a9794aa85da95014999c2a8f8ccbf01a67d"
+  },
+  "id": "3SwBC7pyUPwKb3h0",
+  "tags": [
+    {
+      "name": "apollo-cradle",
+      "id": "cBaBdyzbudmCRsbg",
+      "updatedAt": "2026-04-05T16:22:49.764Z",
+      "createdAt": "2026-04-05T16:22:49.764Z"
+    },
+    {
+      "name": "care-plan",
+      "id": "PAu6JuTQUdqjMFhT",
+      "updatedAt": "2026-04-05T16:22:49.732Z",
+      "createdAt": "2026-04-05T16:22:49.732Z"
+    },
+    {
+      "name": "pre-visit",
+      "id": "UpdJKNeWxWph2nts",
+      "updatedAt": "2026-04-05T16:23:04.183Z",
+      "createdAt": "2026-04-05T16:23:04.183Z"
+    },
+    {
+      "name": "post-visit",
+      "id": "wDETxCWLnOweMOlo",
+      "updatedAt": "2026-04-05T16:23:36.943Z",
+      "createdAt": "2026-04-05T16:23:36.943Z"
+    },
+    {
+      "name": "clinical-safety",
+      "id": "b3fIdEezzqZ0RsFN",
+      "updatedAt": "2026-04-05T16:23:49.618Z",
+      "createdAt": "2026-04-05T16:23:49.618Z"
+    }
+  ]
+}
